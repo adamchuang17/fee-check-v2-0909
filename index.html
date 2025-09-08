@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>住戶管理費查詢（v2／獨立版）</title>
+  <title>住戶管理費查詢（避免跨收據合併版）</title>
   <style>
     * { box-sizing: border-box; }
     body { font-family: ui-sans-serif, system-ui, -apple-system, "Noto Sans TC", "Microsoft JhengHei", Arial, sans-serif; margin: 16px; }
@@ -20,8 +20,6 @@
     .toolbar { display:flex; align-items:center; gap:10px; justify-content: space-between; margin-bottom: 8px; flex-wrap: wrap; }
     .sum { font-weight: 700; }
     .muted { color:#6b7280; }
-    .warn { color:#b45309; }
-    .ok { color:#065f46; }
     #debug { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
              font-size:12px; background:#111827; color:#d1d5db; padding:10px; border-radius:10px; margin-top:10px; display:none; }
     #debug b { color:#93c5fd; }
@@ -32,7 +30,7 @@
   </style>
 </head>
 <body>
-  <h1>住戶管理費查詢（v2／獨立版） <span class="pill">no-cdn</span></h1>
+  <h1>住戶管理費查詢 <span class="pill">no-cdn</span></h1>
   <div class="card">
     <div class="row">
       <div>
@@ -66,7 +64,7 @@
         </label>
         <label style="display:flex; align-items:center; gap:6px;">
           <input type="checkbox" id="optAgg" />
-          彙總模式：管理費＋維修費合併
+          彙總模式：管理費＋維修費合併（同收據）
         </label>
         <button id="btnReload">重新載入資料</button>
         <button id="btnExport">匯出目前查詢結果（CSV）</button>
@@ -178,9 +176,9 @@ function isRepairItem(name){
   return /(維修費|電梯維修(?:費)?|修繕(?:費)?|更新(?:維修)?費)$/.test(s);
 }
 
-// 同戶、同月合併 管理費＋維修類；其他項目完全不動
+// 同「收據號＋戶＋月」合併 管理費＋維修類；其他項目完全不動
 function aggregateRows(rows){
-  const map = new Map();   // key: 棟|地址(norm)|YYYY-MM
+  const map = new Map();   // key: 收據號|棟|地址(norm)|YYYY-MM
   const others = [];
   function amt(s){
     const v = parseInt(String(s || "").replace(/[,\s]/g, ""));
@@ -188,7 +186,7 @@ function aggregateRows(rows){
   }
   rows.forEach(r => {
     const month = r["_月份"] || (r["月份"] || "").toString().replace("/", "-");
-    const key = [r["棟"], r["地址(norm)"], month].join("|");
+    const key = [r["收據號"], r["棟"], r["地址(norm)"], month].join("|");
     const orig = String(r["_origItem"] ?? r["項目"] ?? "").trim(); // 用原始項目判斷
 
     if (orig === "管理費" || isRepairItem(orig)){
@@ -223,7 +221,6 @@ async function loadAll(){
   const selB = document.getElementById("selBuilding");
   selB.innerHTML = '<option value="">— 請選擇 —</option>';
   buildings.forEach(b => selB.appendChild(new Option(b,b)));
-  logDebug("棟 選項數量: " + buildings.length);
 
   // 更新時間（台灣）
   const now = new Date();
@@ -268,15 +265,15 @@ function render() {
   const hideRepair = document.getElementById("optHideRepair")?.checked;
   const useAgg = document.getElementById("optAgg")?.checked;
 
-  // 先做視覺調整，但保留原始項目（_origItem）供彙總判斷
+  // 視覺調整：可併入顯示／隱藏維修列，但保留原始項目供彙總判斷
   let adjusted = rows.map(r => {
     const isR = isRepairItem(r["項目"]);
-    const copy = {...r, _origItem: r["項目"]};           // 保留原始項目
-    if (merge && isR) copy["項目"] = "管理費";            // 只改顯示名稱
+    const copy = {...r, _origItem: r["項目"]};
+    if (merge && isR) copy["項目"] = "管理費";
     return {row: copy, hidden: (hideRepair && isR)};
   }).filter(x => !x.hidden).map(x => x.row);
 
-  // 真正彙總（只吃 原始=管理費 或 維修類）
+  // 真正彙總（同收據＋同戶＋同月）
   const displayRows = useAgg ? aggregateRows(adjusted) : adjusted;
 
   displayRows.forEach(r => {
