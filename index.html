@@ -64,6 +64,10 @@
           <input type="checkbox" id="optHideRepair" />
           隱藏維修費分列
         </label>
+        <label style="display:flex; align-items:center; gap:6px;">
+          <input type="checkbox" id="optAgg" />
+          彙總模式：管理費＋維修費合併
+        </label>
         <button id="btnReload">重新載入資料</button>
         <button id="btnExport">匯出目前查詢結果（CSV）</button>
         <button id="btnDebug">顯示偵錯</button>
@@ -173,6 +177,33 @@ function isRepairItem(name){
   return /(維修費|電梯維修|修繕|更新費)/.test(s);
 }
 
+// 同戶、同月合併管理費＋維修費；其他項目照原樣保留
+function aggregateRows(rows){
+  const map = new Map();   // key: 棟|地址(norm)|YYYY-MM
+  const others = [];
+  function amt(s){
+    const v = parseInt(String(s || "").replace(/[,\s]/g, ""));
+    return Number.isNaN(v) ? 0 : v;
+  }
+  rows.forEach(r => {
+    const month = r["_月份"] || (r["月份"] || "").toString().replace("/", "-");
+    const key = [r["棟"], r["地址(norm)"], month].join("|");
+    const item = String(r["項目"] || "").trim();
+    if (item === "管理費" || isRepairItem(item)){
+      const cur = map.get(key) || {
+        "收據號": r["收據號"], "日期": r["日期"], "管理員": r["管理員"],
+        "棟": r["棟"], "地址": r["地址"], "住戶代號": r["住戶代號"],
+        "月份": r["月份"], "_月份": month, "項目": "管理費（含維修）", "金額": 0, "備註": ""
+      };
+      cur["金額"] = (amt(cur["金額"]) + amt(r["金額"]));
+      map.set(key, cur);
+    } else {
+      others.push({...r});
+    }
+  });
+  return Array.from(map.values()).concat(others);
+}
+
 async function loadAll(){
   document.getElementById("lastUpdated").textContent = "載入中…";
   const [resCSV, jrnlCSV] = await Promise.all([ fetchCSV("residents.csv"), fetchCSV("journal.csv") ]);
@@ -233,25 +264,24 @@ function render() {
   let total = 0;
   const merge = document.getElementById("optMergeRepair")?.checked;
   const hideRepair = document.getElementById("optHideRepair")?.checked;
+  const useAgg = document.getElementById("optAgg")?.checked;
 
-  rows.forEach(r => {
-    let itemName = r["項目"];
-    const isRepair = isRepairItem(itemName);
+  // 先處理「合併顯示」「隱藏維修列」的視覺調整（不影響數字）
+  let adjusted = rows.map(r => {
+    const isR = isRepairItem(r["項目"]);
+    const copy = {...r};
+    if (merge && isR) copy["項目"] = "管理費";
+    return {row: copy, hidden: (hideRepair && isR)};
+  }).filter(x => !x.hidden).map(x => x.row);
 
-    // 隱藏維修費（仍計入總額）
-    if (hideRepair && isRepair) {
-      const val0 = parseInt((r["金額"] || "").toString().replace(/[,\s]/g, ""));
-      if (!Number.isNaN(val0)) total += val0;
-      return;
-    }
+  // 若開啟彙總模式，做真正加總
+  const displayRows = useAgg ? aggregateRows(adjusted) : adjusted;
 
-    // 併入管理費顯示
-    if (merge && isRepair) itemName = "管理費";
-
+  displayRows.forEach(r => {
     const tr = document.createElement("tr");
     const cells = [
       r["收據號"], r["日期"], r["管理員"], r["棟"], r["地址"],
-      r["住戶代號"], r["月份"], itemName, r["金額"], r["備註"]
+      r["住戶代號"], r["月份"], r["項目"], r["金額"], r["備註"]
     ];
     cells.forEach((v, idx) => {
       const td = document.createElement("td");
@@ -273,8 +303,8 @@ function render() {
   });
 
   const stats = document.getElementById("stats");
-  stats.innerHTML = rows.length
-    ? `已載入 <b>${rows.length}</b> 筆紀錄，合計金額 <span class="sum">${new Intl.NumberFormat("zh-Hant").format(total)}</span> 元。`
+  stats.innerHTML = displayRows.length
+    ? `已載入 <b>${displayRows.length}</b> 筆紀錄，合計金額 <span class="sum">${new Intl.NumberFormat("zh-Hant").format(total)}</span> 元。`
     : `查無資料，請嘗試清除月份篩選或確認住址。`;
 }
 
@@ -305,6 +335,9 @@ document.getElementById("btnDebug").addEventListener("click", () => {
   const d = document.getElementById("debug");
   d.style.display = (d.style.display === "block" ? "none" : "block");
 });
+document.getElementById("optMergeRepair").addEventListener("change", render);
+document.getElementById("optHideRepair").addEventListener("change", render);
+document.getElementById("optAgg").addEventListener("change", render);
 
 // init
 loadAll().then(render).catch(e => { alert(e); logDebug(String(e)); });
