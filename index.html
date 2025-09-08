@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>住戶管理費查詢（v2／獨立版）</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, "Noto Sans TC", "Microsoft JhengHei", Arial, sans-serif; margin: 16px; }
+    h1 { font-size: 22px; margin: 0 0 12px; }
+    .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 16px; box-shadow: 0 2px 6px rgba(0,0,0,.03); }
+    .row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+    label { font-size: 14px; color: #374151; display:block; margin-bottom: 6px; }
+    select, input[type="month"] { width: 100%; padding: 10px; border-radius: 10px; border: 1px solid #d1d5db; font-size: 14px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { padding: 10px; border-bottom: 1px solid #e5e7eb; text-align: left; font-size: 14px; white-space: nowrap; }
+    th { background: #f9fafb; position: sticky; top: 0; }
+    .hint { color: #6b7280; font-size: 12px; }
+    .pill { display:inline-block; padding: 2px 8px; border-radius: 999px; border: 1px solid #d1d5db; font-size: 12px; margin-left: 8px; }
+    .toolbar { display:flex; align-items:center; gap:10px; justify-content: space-between; margin-bottom: 8px; flex-wrap: wrap; }
+    .sum { font-weight: 700; }
+    .muted { color:#6b7280; }
+    .warn { color:#b45309; }
+    .ok { color:#065f46; }
+    #debug { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+             font-size:12px; background:#111827; color:#d1d5db; padding:10px; border-radius:10px; margin-top:10px; display:none; }
+    #debug b { color:#93c5fd; }
+    @media (max-width: 860px) {
+      .row { grid-template-columns: 1fr; }
+      th, td { white-space: normal; }
+    }
+  </style>
+</head>
+<body>
+  <h1>住戶管理費查詢（v2／獨立版） <span class="pill">no-cdn</span></h1>
+  <div class="card">
+    <div class="row">
+      <div>
+        <label for="selBuilding">棟</label>
+        <select id="selBuilding"><option value="">— 請選擇 —</option></select>
+      </div>
+      <div>
+        <label for="selAddress">住址</label>
+        <select id="selAddress" disabled><option value="">— 請先選棟 —</option></select>
+        <div class="hint">說明：將「47-1」視為「47之1」，避免格式差異。</div>
+      </div>
+      <div>
+        <label for="filterMonth">月份（可選）</label>
+        <input type="month" id="filterMonth" />
+      </div>
+    </div>
+
+    <div class="toolbar" style="margin-top:12px;">
+      <div class="muted">
+        資料來源：<code>residents.csv</code>、<code>journal.csv</code>（同資料夾）。
+        <span class="muted">最後更新：<span id="lastUpdated">—</span></span>
+      </div>
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        <label style="display:flex; align-items:center; gap:6px;">
+          <input type="checkbox" id="optMergeRepair" />
+          把維修費併入管理費顯示
+        </label>
+        <label style="display:flex; align-items:center; gap:6px;">
+          <input type="checkbox" id="optHideRepair" />
+          隱藏維修費分列
+        </label>
+        <button id="btnReload">重新載入資料</button>
+        <button id="btnExport">匯出目前查詢結果（CSV）</button>
+        <button id="btnDebug">顯示偵錯</button>
+      </div>
+    </div>
+
+    <div id="stats" class="muted">尚未選擇住址。</div>
+    <div id="debug"></div>
+
+    <div style="overflow:auto; max-height: 70vh;">
+      <table id="tbl">
+        <thead>
+          <tr>
+            <th>收據號</th>
+            <th>日期</th>
+            <th>管理員</th>
+            <th>棟</th>
+            <th>地址</th>
+            <th>住戶代號</th>
+            <th>月份</th>
+            <th>項目</th>
+            <th>金額</th>
+            <th>備註</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+
+<script>
+const state = { residents: [], journal: [] };
+const needResCols = ["棟","地址","住戶代號","區權人"];
+const needJrnlCols = ["收據號","日期","管理員","棟","地址","住戶代號","月份","項目","金額","備註"];
+
+function logDebug(msg){
+  const box = document.getElementById('debug');
+  box.style.display = 'block';
+  const now = new Date().toISOString();
+  box.innerHTML += `[${now}] ${msg}<br/>`;
+}
+
+function normalizeAddress(s) {
+  if (!s) return "";
+  const trimmed = s.toString().replace(/^\ufeff/, '').trim().replace(/　/g, " ").replace(/\s+/g, "");
+  if (/^\d+\-\d+$/.test(trimmed)) return trimmed.replace("-", "之");
+  return trimmed;
+}
+function parseMonth(dstr) {
+  if (!dstr) return "";
+  const s = dstr.trim();
+  let m = s.match(/^(\d{4})[\/-]?(\d{1,2})/);
+  if (m) {
+    const y = m[1];
+    const mm = m[2].padStart(2, "0");
+    return y + "-" + mm;
+  }
+  return "";
+}
+
+// Minimal CSV parser (quoted fields, commas/newlines inside quotes)
+function parseCSV(text){
+  text = text.replace(/^\ufeff/, ''); // strip BOM
+  const rows = [];
+  let row = [], cur = "", i = 0, inQuotes = false;
+  while(i < text.length){
+    const c = text[i];
+    if (inQuotes){
+      if (c === '"'){
+        if (text[i+1] === '"'){ cur += '"'; i += 2; continue; }
+        inQuotes = false; i++; continue;
+      } else { cur += c; i++; continue; }
+    } else {
+      if (c === '"'){ inQuotes = true; i++; continue; }
+      if (c === ','){ row.push(cur); cur = ""; i++; continue; }
+      if (c === '\n'){ row.push(cur); rows.push(row); row = []; cur = ""; i++; continue; }
+      if (c === '\r'){ i++; continue; }
+      cur += c; i++; continue;
+    }
+  }
+  row.push(cur); rows.push(row);
+  const header = rows.shift().map(s => s.trim());
+  const data = rows.filter(r => r.some(x => x !== ""))
+                   .map(r => { const obj = {}; header.forEach((h, idx) => obj[h] = (r[idx] ?? "").trim()); return obj; });
+  return { header, data };
+}
+
+async function fetchCSV(url){
+  const u = url + (url.includes('?') ? '&' : '?') + 't=' + Date.now(); // cache-busting
+  const res = await fetch(u, {cache:'no-store'});
+  if (!res.ok) throw new Error(url + " 回應狀態 " + res.status);
+  const txt = await res.text();
+  return parseCSV(txt);
+}
+
+function uniqueSorted(arr) {
+  return Array.from(new Set(arr)).filter(Boolean).sort((a,b) => {
+    const na = parseInt(a); const nb = parseInt(b);
+    if (!Number.isNaN(na) && !Number.isNaN(nb)) return na - nb;
+    return a.localeCompare(b, "zh-Hant");
+  });
+}
+
+function isRepairItem(name){
+  if (!name) return false;
+  const s = String(name).trim();
+  return /(維修費|電梯維修|修繕|更新費)/.test(s);
+}
+
+async function loadAll(){
+  document.getElementById("lastUpdated").textContent = "載入中…";
+  const [resCSV, jrnlCSV] = await Promise.all([ fetchCSV("residents.csv"), fetchCSV("journal.csv") ]);
+  logDebug("<b>residents.csv header</b>: " + JSON.stringify(resCSV.header));
+  logDebug("<b>journal.csv header</b>: " + JSON.stringify(jrnlCSV.header));
+
+  needResCols.forEach(c => { if (!resCSV.header.includes(c)) throw new Error("residents.csv 缺少欄位：「" + c + "」"); });
+  needJrnlCols.forEach(c => { if (!jrnlCSV.header.includes(c)) throw new Error("journal.csv 缺少欄位：「" + c + "」"); });
+
+  state.residents = resCSV.data.map(r => ({...r, "地址(norm)": normalizeAddress(r["地址"]||r["住址"]||"")}));
+  state.journal   = jrnlCSV.data.map(r => ({...r, "地址(norm)": normalizeAddress(r["地址"]||""), "_月份": parseMonth(r["日期"]||r["月份"]||"")}));
+
+  // 棟下拉
+  const buildings = uniqueSorted(state.residents.map(r => r["棟"]));
+  const selB = document.getElementById("selBuilding");
+  selB.innerHTML = '<option value="">— 請選擇 —</option>';
+  buildings.forEach(b => selB.appendChild(new Option(b,b)));
+  logDebug("棟 選項數量: " + buildings.length);
+
+  // 更新時間（台灣）
+  const now = new Date();
+  const tzNow = new Intl.DateTimeFormat('zh-Hant', { timeZone: 'Asia/Taipei', year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit' }).format(now);
+  document.getElementById("lastUpdated").textContent = tzNow;
+}
+
+function onBuildingChange() {
+  const b = document.getElementById("selBuilding").value;
+  const selA = document.getElementById("selAddress");
+  selA.innerHTML = "";
+  if (!b) {
+    selA.disabled = true;
+    selA.appendChild(new Option("— 請先選棟 —", ""));
+    render();
+    return;
+  }
+  const addrs = uniqueSorted(state.residents.filter(r => r["棟"] === b).map(r => r["地址"]));
+  selA.appendChild(new Option("— 請選擇 —", ""));
+  addrs.forEach(a => selA.appendChild(new Option(a, a)));
+  selA.disabled = false;
+  render();
+}
+
+function render() {
+  const b = document.getElementById("selBuilding").value;
+  const a = document.getElementById("selAddress").value;
+  const m = document.getElementById("filterMonth").value; // YYYY-MM
+  const tbody = document.querySelector("#tbl tbody");
+  tbody.innerHTML = "";
+
+  if (!b || !a) {
+    document.getElementById("stats").textContent = "尚未選擇住址。";
+    return;
+  }
+  const addrNorm = normalizeAddress(a);
+  let rows = state.journal.filter(r => (r["棟"] === b) && ((r["地址(norm)"]||"") === addrNorm));
+  if (m) rows = rows.filter(r => (r["_月份"] === m) || (r["月份"] && r["月份"].startsWith(m)));
+
+  let total = 0;
+  const merge = document.getElementById("optMergeRepair")?.checked;
+  const hideRepair = document.getElementById("optHideRepair")?.checked;
+
+  rows.forEach(r => {
+    let itemName = r["項目"];
+    const isRepair = isRepairItem(itemName);
+
+    // 隱藏維修費（仍計入總額）
+    if (hideRepair && isRepair) {
+      const val0 = parseInt((r["金額"] || "").toString().replace(/[,\s]/g, ""));
+      if (!Number.isNaN(val0)) total += val0;
+      return;
+    }
+
+    // 併入管理費顯示
+    if (merge && isRepair) itemName = "管理費";
+
+    const tr = document.createElement("tr");
+    const cells = [
+      r["收據號"], r["日期"], r["管理員"], r["棟"], r["地址"],
+      r["住戶代號"], r["月份"], itemName, r["金額"], r["備註"]
+    ];
+    cells.forEach((v, idx) => {
+      const td = document.createElement("td");
+      let text = (v ?? "").toString();
+      if (idx === 8) { // 金額
+        const val = parseInt(text.replace(/[,\s]/g, ""));
+        if (!Number.isNaN(val)) {
+          total += val;
+          text = new Intl.NumberFormat("zh-Hant").format(val);
+          td.style.textAlign = "right";
+        } else {
+          td.style.textAlign = "right";
+        }
+      }
+      td.textContent = text;
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+
+  const stats = document.getElementById("stats");
+  stats.innerHTML = rows.length
+    ? `已載入 <b>${rows.length}</b> 筆紀錄，合計金額 <span class="sum">${new Intl.NumberFormat("zh-Hant").format(total)}</span> 元。`
+    : `查無資料，請嘗試清除月份篩選或確認住址。`;
+}
+
+function exportCSV() {
+  const table = document.getElementById("tbl");
+  const rows = Array.from(table.querySelectorAll("tr")).map(tr =>
+    Array.from(tr.querySelectorAll("th,td")).map(td => '"' + (td.textContent.replace(/"/g, '""')) + '"').join(",")
+  ).join("\n");
+
+  const blob = new Blob([rows], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "query_result.csv";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// events
+document.getElementById("selBuilding").addEventListener("change", onBuildingChange);
+document.getElementById("selAddress").addEventListener("change", render);
+document.getElementById("filterMonth").addEventListener("change", render);
+document.getElementById("btnReload").addEventListener("click", () => loadAll().then(render).catch(e => { alert(e); logDebug(String(e)); }));
+document.getElementById("btnExport").addEventListener("click", exportCSV);
+document.getElementById("btnDebug").addEventListener("click", () => {
+  const d = document.getElementById("debug");
+  d.style.display = (d.style.display === "block" ? "none" : "block");
+});
+
+// init
+loadAll().then(render).catch(e => { alert(e); logDebug(String(e)); });
+</script>
+</body>
+</html>
