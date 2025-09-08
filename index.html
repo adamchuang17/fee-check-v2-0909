@@ -171,13 +171,14 @@ function uniqueSorted(arr) {
   });
 }
 
+// 嚴格辨識「維修類」
 function isRepairItem(name){
   if (!name) return false;
   const s = String(name).trim();
-  return /(維修費|電梯維修|修繕|更新費)/.test(s);
+  return /(維修費|電梯維修(?:費)?|修繕(?:費)?|更新(?:維修)?費)$/.test(s);
 }
 
-// 同戶、同月合併管理費＋維修費；其他項目照原樣保留
+// 同戶、同月合併 管理費＋維修類；其他項目完全不動
 function aggregateRows(rows){
   const map = new Map();   // key: 棟|地址(norm)|YYYY-MM
   const others = [];
@@ -188,8 +189,9 @@ function aggregateRows(rows){
   rows.forEach(r => {
     const month = r["_月份"] || (r["月份"] || "").toString().replace("/", "-");
     const key = [r["棟"], r["地址(norm)"], month].join("|");
-    const item = String(r["項目"] || "").trim();
-    if (item === "管理費" || isRepairItem(item)){
+    const orig = String(r["_origItem"] ?? r["項目"] ?? "").trim(); // 用原始項目判斷
+
+    if (orig === "管理費" || isRepairItem(orig)){
       const cur = map.get(key) || {
         "收據號": r["收據號"], "日期": r["日期"], "管理員": r["管理員"],
         "棟": r["棟"], "地址": r["地址"], "住戶代號": r["住戶代號"],
@@ -266,15 +268,15 @@ function render() {
   const hideRepair = document.getElementById("optHideRepair")?.checked;
   const useAgg = document.getElementById("optAgg")?.checked;
 
-  // 先處理「合併顯示」「隱藏維修列」的視覺調整（不影響數字）
+  // 先做視覺調整，但保留原始項目（_origItem）供彙總判斷
   let adjusted = rows.map(r => {
     const isR = isRepairItem(r["項目"]);
-    const copy = {...r};
-    if (merge && isR) copy["項目"] = "管理費";
+    const copy = {...r, _origItem: r["項目"]};           // 保留原始項目
+    if (merge && isR) copy["項目"] = "管理費";            // 只改顯示名稱
     return {row: copy, hidden: (hideRepair && isR)};
   }).filter(x => !x.hidden).map(x => x.row);
 
-  // 若開啟彙總模式，做真正加總
+  // 真正彙總（只吃 原始=管理費 或 維修類）
   const displayRows = useAgg ? aggregateRows(adjusted) : adjusted;
 
   displayRows.forEach(r => {
